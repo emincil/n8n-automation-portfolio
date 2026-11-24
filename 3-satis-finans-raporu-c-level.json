@@ -1,0 +1,160 @@
+{
+  "name": "Weekly Sales & Finance Report to C-Level",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 8 * * 1" }
+          ]
+        }
+      },
+      "id": "r1",
+      "name": "Every Monday 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "documentId": { "__rl": true, "mode": "url", "value": "" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Sales" },
+        "options": {}
+      },
+      "id": "r2",
+      "name": "Read Sales",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [220, 300],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "documentId": { "__rl": true, "mode": "url", "value": "" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Expenses" },
+        "options": {}
+      },
+      "id": "r3",
+      "name": "Read Expenses",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [440, 300],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// KPIs for last week vs the week before\n// Sales columns: date, region, product, channel, quantity, revenue, cost\n// Expenses columns: date, category, amount\nconst DAY = 86400000;\nconst now = new Date(); now.setHours(0, 0, 0, 0);\nconst mondayThis = new Date(now.getTime() - ((now.getDay() + 6) % 7) * DAY);\nconst start = new Date(mondayThis.getTime() - 7 * DAY), end = mondayThis;\nconst pStart = new Date(start.getTime() - 7 * DAY), pEnd = start;\nconst n = v => Number(String(v ?? 0).replace(/[^0-9.\\-]/g, '')) || 0;\nconst inRange = (d, a, b) => { const t = new Date(d); return t >= a && t < b; };\nconst sales = $('Read Sales').all().map(i => i.json).filter(r => r.date);\nconst exps = $('Read Expenses').all().map(i => i.json).filter(r => r.date);\nconst cur = sales.filter(r => inRange(r.date, start, end));\nconst prev = sales.filter(r => inRange(r.date, pStart, pEnd));\nconst sum = (arr, f) => arr.reduce((s, r) => s + n(r[f]), 0);\nconst group = (arr, key, f) => { const g = {}; for (const r of arr) g[r[key] || 'Other'] = (g[r[key] || 'Other'] || 0) + n(r[f]); return Object.entries(g).sort((a, b) => b[1] - a[1]); };\nconst revenue = sum(cur, 'revenue'), revenuePrev = sum(prev, 'revenue');\nconst cogs = sum(cur, 'cost');\nconst curExp = exps.filter(r => inRange(r.date, start, end));\nconst opex = sum(curExp, 'amount');\nconst grossProfit = revenue - cogs;\nconst netResult = grossProfit - opex;\nconst pct = (a, b) => b ? Number((((a - b) / b) * 100).toFixed(1)) : null;\nreturn [{ json: {\n  period: `${start.toISOString().slice(0, 10)} to ${new Date(end.getTime() - DAY).toISOString().slice(0, 10)}`,\n  revenue, revenuePrev, revenueChangePct: pct(revenue, revenuePrev),\n  orders: cur.length, ordersPrev: prev.length,\n  avgOrder: cur.length ? Number((revenue / cur.length).toFixed(2)) : 0,\n  grossProfit, grossMarginPct: revenue ? Number(((grossProfit / revenue) * 100).toFixed(1)) : 0,\n  opex, netResult,\n  topProducts: group(cur, 'product', 'revenue').slice(0, 5),\n  byRegion: group(cur, 'region', 'revenue'),\n  byChannel: group(cur, 'channel', 'revenue'),\n  expensesByCategory: group(curExp, 'category', 'amount').slice(0, 6)\n}}];"
+      },
+      "id": "r4",
+      "name": "Calculate KPIs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-4o-mini', temperature: 0.3, messages: [ { role: 'system', content: 'You write a short executive summary for a CEO and CFO. Use only the numbers given, never invent data. 4-5 bullet points, plain business English, each under 25 words. Mention the biggest change and one risk to watch. Return HTML <ul><li>...</li></ul> only.' }, { role: 'user', content: JSON.stringify($json) } ] }) }}",
+        "options": {}
+      },
+      "id": "r5",
+      "name": "AI Executive Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 300],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the HTML email\nconst k = $('Calculate KPIs').first().json;\nlet summary = $input.first().json?.choices?.[0]?.message?.content || '<ul><li>Summary unavailable this week. Figures below are complete.</li></ul>';\nconst money = v => Number(v || 0).toLocaleString('tr-TR', { minimumFractionDigits: 0, maximumFractionDigits: 0 }) + ' ₺';\nconst chg = v => v === null ? '-' : `<span style=\"color:${v >= 0 ? '#1d7a4c' : '#b03a2e'}\">${v >= 0 ? '+' : ''}${v}%</span>`;\nconst rows = arr => arr.map(([name, val]) => `<tr><td style=\"padding:4px 10px;border-bottom:1px solid #eee\">${name}</td><td style=\"padding:4px 10px;border-bottom:1px solid #eee;text-align:right\">${money(val)}</td></tr>`).join('');\nconst card = (label, value, sub = '') => `<td style=\"padding:10px 14px;background:#f5f7f9;border-radius:6px\"><div style=\"font-size:12px;color:#5a6876\">${label}</div><div style=\"font-size:18px;font-weight:700\">${value}</div><div style=\"font-size:12px\">${sub}</div></td>`;\nconst html = `<div style=\"font-family:Segoe UI,Arial,sans-serif;max-width:640px;color:#16202a\">\n<h2 style=\"margin:0 0 4px\">Weekly Sales & Finance Report</h2>\n<div style=\"color:#5a6876;margin-bottom:16px\">${k.period}</div>\n<table cellspacing=\"8\"><tr>${card('Revenue', money(k.revenue), chg(k.revenueChangePct) + ' vs prior week')}${card('Gross margin', k.grossMarginPct + '%', money(k.grossProfit))}${card('Net result', money(k.netResult), 'after ' + money(k.opex) + ' opex')}</tr></table>\n<h3>Summary</h3>${summary}\n<h3>Top products</h3><table style=\"border-collapse:collapse;width:100%\">${rows(k.topProducts)}</table>\n<h3>Revenue by region</h3><table style=\"border-collapse:collapse;width:100%\">${rows(k.byRegion)}</table>\n<h3>Expenses by category</h3><table style=\"border-collapse:collapse;width:100%\">${rows(k.expensesByCategory)}</table>\n<p style=\"color:#5a6876;font-size:12px;margin-top:20px\">Orders: ${k.orders} (prior week ${k.ordersPrev}) · Avg order: ${money(k.avgOrder)} · Generated automatically by n8n</p></div>`;\nreturn [{ json: { html, subject: `Weekly report ${k.period}: revenue ${money(k.revenue)} (${k.revenueChangePct ?? '-'}%)`, ...k } }];"
+      },
+      "id": "r6",
+      "name": "Build HTML Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 300]
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "sendTo": "ceo@example.com, cfo@example.com, coo@example.com",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "r7",
+      "name": "Email C-Level",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1320, 220]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "mode": "url", "value": "" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Report Log" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "period": "={{ $json.period }}",
+            "revenue": "={{ $json.revenue }}",
+            "revenueChangePct": "={{ $json.revenueChangePct }}",
+            "grossMarginPct": "={{ $json.grossMarginPct }}",
+            "netResult": "={{ $json.netResult }}",
+            "sentAt": "={{ new Date().toISOString() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "r8",
+      "name": "Log Report",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1320, 400]
+    },
+    {
+      "parameters": {},
+      "id": "r9",
+      "name": "On Error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [0, 620]
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "sendTo": "ops@example.com",
+        "subject": "Weekly report failed",
+        "emailType": "text",
+        "message": "=The weekly C-level report did not go out.\n\nNode: {{ $json.execution.lastNodeExecuted }}\nError: {{ $json.execution.error.message }}\nExecution: {{ $json.execution.url }}",
+        "options": {}
+      },
+      "id": "r10",
+      "name": "Error Alert",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [220, 620]
+    }
+  ],
+  "connections": {
+    "Every Monday 08:00": { "main": [[{ "node": "Read Sales", "type": "main", "index": 0 }]] },
+    "Read Sales": { "main": [[{ "node": "Read Expenses", "type": "main", "index": 0 }]] },
+    "Read Expenses": { "main": [[{ "node": "Calculate KPIs", "type": "main", "index": 0 }]] },
+    "Calculate KPIs": { "main": [[{ "node": "AI Executive Summary", "type": "main", "index": 0 }]] },
+    "AI Executive Summary": { "main": [[{ "node": "Build HTML Report", "type": "main", "index": 0 }]] },
+    "Build HTML Report": { "main": [[
+      { "node": "Email C-Level", "type": "main", "index": 0 },
+      { "node": "Log Report", "type": "main", "index": 0 }
+    ]] },
+    "On Error": { "main": [[{ "node": "Error Alert", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1", "timezone": "Europe/Istanbul" },
+  "pinData": {}
+}

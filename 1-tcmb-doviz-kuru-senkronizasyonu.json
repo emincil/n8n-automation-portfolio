@@ -1,0 +1,183 @@
+{
+  "name": "TCMB Exchange Rates Sync (Daily)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "45 15 * * 1-5" }
+          ]
+        }
+      },
+      "id": "t1",
+      "name": "Weekdays 15:45",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://www.tcmb.gov.tr/kurlar/today.xml",
+        "options": {
+          "response": { "response": { "responseFormat": "text", "outputPropertyName": "data" } },
+          "timeout": 20000
+        }
+      },
+      "id": "t2",
+      "name": "Get TCMB Rates (XML)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "xmlToJson",
+        "dataPropertyName": "data",
+        "options": { "explicitArray": false, "mergeAttrs": true }
+      },
+      "id": "t3",
+      "name": "XML to JSON",
+      "type": "n8n-nodes-base.xml",
+      "typeVersion": 1,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn the TCMB bulletin into one row per currency\nconst WANTED = ['USD', 'EUR', 'GBP', 'CHF', 'JPY', 'SAR', 'RUB', 'CNY'];\nconst root = $input.first().json.Tarih_Date;\nif (!root || !root.Currency) throw new Error('Unexpected TCMB response format');\nconst [m, d, y] = String(root.Date).split('/'); // Date attr is MM/DD/YYYY\nconst date = `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;\nconst num = v => (v === undefined || v === null || v === '') ? null : Number(String(v).replace(',', '.'));\nconst list = Array.isArray(root.Currency) ? root.Currency : [root.Currency];\nreturn list\n  .filter(c => WANTED.includes(c.CurrencyCode))\n  .map(c => {\n    const unit = num(c.Unit) || 1;\n    return { json: {\n      key: `${date}_${c.CurrencyCode}`,\n      date,\n      bulletinNo: root.Bulten_No,\n      currency: c.CurrencyCode,\n      name: c.CurrencyName,\n      unit,\n      forexBuying: num(c.ForexBuying),\n      forexSelling: num(c.ForexSelling),\n      banknoteBuying: num(c.BanknoteBuying),\n      banknoteSelling: num(c.BanknoteSelling),\n      syncedAt: new Date().toISOString()\n    }};\n  });"
+      },
+      "id": "t4",
+      "name": "Parse Currencies",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "mode": "url", "value": "" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Rate History" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": ["key"]
+        },
+        "options": {}
+      },
+      "id": "t5",
+      "name": "Upsert Rate History",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "documentId": { "__rl": true, "mode": "url", "value": "" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Latest" },
+        "options": {}
+      },
+      "id": "t6",
+      "name": "Read Previous Rates",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1100, 300],
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Compare today's selling rate with the previous one and flag big moves\nconst THRESHOLD_PCT = 1.5;\nconst today = $('Parse Currencies').all().map(i => i.json);\nconst prev = {};\nfor (const r of $('Read Previous Rates').all()) if (r.json.currency) prev[r.json.currency] = r.json;\nreturn today.map(t => {\n  const p = prev[t.currency];\n  const before = p ? Number(p.forexSelling) : null;\n  const changePct = before ? Number((((t.forexSelling - before) / before) * 100).toFixed(2)) : null;\n  return { json: { ...t, previousSelling: before, changePct, bigMove: changePct !== null && Math.abs(changePct) >= THRESHOLD_PCT } };\n});"
+      },
+      "id": "t7",
+      "name": "Calculate Daily Change",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "mode": "url", "value": "" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Latest" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": ["currency"]
+        },
+        "options": {}
+      },
+      "id": "t8",
+      "name": "Update Latest Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1540, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            { "id": "k1", "leftValue": "={{ $json.bigMove }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "t9",
+      "name": "Big Move?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1540, 400]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ '⚠️ TCMB ' + $json.date + ' | ' + $json.currency + ': ' + $json.forexSelling + ' TL (' + ($json.changePct > 0 ? '+' : '') + $json.changePct + '% vs previous ' + $json.previousSelling + ')' }}",
+        "additionalFields": {}
+      },
+      "id": "t10",
+      "name": "Alert (Telegram)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1760, 380]
+    },
+    {
+      "parameters": {},
+      "id": "t11",
+      "name": "On Error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [0, 620]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ '❌ TCMB sync failed at ' + $json.execution.lastNodeExecuted + ': ' + $json.execution.error.message }}",
+        "additionalFields": {}
+      },
+      "id": "t12",
+      "name": "Error Alert (Telegram)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [220, 620]
+    }
+  ],
+  "connections": {
+    "Weekdays 15:45": { "main": [[{ "node": "Get TCMB Rates (XML)", "type": "main", "index": 0 }]] },
+    "Get TCMB Rates (XML)": { "main": [[{ "node": "XML to JSON", "type": "main", "index": 0 }]] },
+    "XML to JSON": { "main": [[{ "node": "Parse Currencies", "type": "main", "index": 0 }]] },
+    "Parse Currencies": { "main": [[{ "node": "Upsert Rate History", "type": "main", "index": 0 }]] },
+    "Upsert Rate History": { "main": [[{ "node": "Read Previous Rates", "type": "main", "index": 0 }]] },
+    "Read Previous Rates": { "main": [[{ "node": "Calculate Daily Change", "type": "main", "index": 0 }]] },
+    "Calculate Daily Change": { "main": [[
+      { "node": "Update Latest Sheet", "type": "main", "index": 0 },
+      { "node": "Big Move?", "type": "main", "index": 0 }
+    ]] },
+    "Big Move?": { "main": [[{ "node": "Alert (Telegram)", "type": "main", "index": 0 }], []] },
+    "On Error": { "main": [[{ "node": "Error Alert (Telegram)", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1", "timezone": "Europe/Istanbul" },
+  "pinData": {}
+}

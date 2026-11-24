@@ -1,0 +1,206 @@
+{
+  "name": "Stock Trade Tracker (Portfolio P/L + Daily Report)",
+  "nodes": [
+    {
+      "parameters": { "updates": ["message"], "additionalFields": {} },
+      "id": "s1",
+      "name": "Telegram: New Trade",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0],
+      "webhookId": "trade-bot"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Message format: /buy THYAO.IS 100 285.50 [fee]  or  /sell AAPL 10 190.2\nconst text = String($input.first().json.message?.text || '').trim();\nconst m = text.match(/^\\/(buy|sell)\\s+([A-Za-z0-9.\\-]+)\\s+([\\d.]+)\\s+([\\d.,]+)(?:\\s+([\\d.,]+))?$/i);\nif (!m) return [{ json: { ok: false, chatId: $input.first().json.message?.chat?.id, reply: 'Format: /buy SYMBOL QTY PRICE [FEE]  e.g. /buy THYAO.IS 100 285.50' } }];\nconst n = v => Number(String(v || '0').replace(',', '.'));\nreturn [{ json: {\n  ok: true,\n  chatId: $input.first().json.message.chat.id,\n  date: new Date().toISOString().slice(0, 10),\n  side: m[1].toUpperCase(),\n  symbol: m[2].toUpperCase(),\n  qty: n(m[3]),\n  price: n(m[4]),\n  fee: n(m[5]),\n  enteredAt: new Date().toISOString()\n}}];"
+      },
+      "id": "s2",
+      "name": "Parse Trade Command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            { "id": "q1", "leftValue": "={{ $json.ok }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "s3",
+      "name": "Valid Command?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "mode": "url", "value": "" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Trades" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "date": "={{ $json.date }}",
+            "side": "={{ $json.side }}",
+            "symbol": "={{ $json.symbol }}",
+            "qty": "={{ $json.qty }}",
+            "price": "={{ $json.price }}",
+            "fee": "={{ $json.fee }}",
+            "enteredAt": "={{ $json.enteredAt }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "s4",
+      "name": "Log Trade",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [660, -80]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Parse Trade Command').item.json.chatId }}",
+        "text": "={{ '✅ Saved: ' + $('Parse Trade Command').item.json.side + ' ' + $('Parse Trade Command').item.json.qty + ' ' + $('Parse Trade Command').item.json.symbol + ' @ ' + $('Parse Trade Command').item.json.price }}",
+        "additionalFields": {}
+      },
+      "id": "s5",
+      "name": "Confirm Trade",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [880, -80]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.reply }}",
+        "additionalFields": {}
+      },
+      "id": "s6",
+      "name": "Send Format Help",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [660, 100]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "30 18 * * 1-5" }
+          ]
+        }
+      },
+      "id": "s7",
+      "name": "Weekdays 18:30 (after close)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 400]
+    },
+    {
+      "parameters": {
+        "documentId": { "__rl": true, "mode": "url", "value": "" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Trades" },
+        "options": {}
+      },
+      "id": "s8",
+      "name": "Read All Trades",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [220, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build open positions with average cost and realized P/L (average cost method)\nconst trades = $input.all().map(i => i.json).sort((a, b) => String(a.enteredAt || a.date).localeCompare(String(b.enteredAt || b.date)));\nconst pos = {};\nfor (const t of trades) {\n  const s = String(t.symbol || '').toUpperCase(); if (!s) continue;\n  const qty = Number(t.qty), price = Number(t.price), fee = Number(t.fee || 0);\n  const p = pos[s] || (pos[s] = { symbol: s, qty: 0, avgCost: 0, realized: 0, trades: 0 });\n  p.trades++;\n  if (String(t.side).toUpperCase() === 'BUY') {\n    p.avgCost = (p.avgCost * p.qty + price * qty + fee) / (p.qty + qty);\n    p.qty += qty;\n  } else {\n    p.realized += (price - p.avgCost) * qty - fee;\n    p.qty -= qty;\n    if (p.qty <= 0) { p.qty = 0; p.avgCost = 0; }\n  }\n}\nreturn Object.values(pos).map(p => ({ json: { ...p, avgCost: Number(p.avgCost.toFixed(4)), realized: Number(p.realized.toFixed(2)) } }));"
+      },
+      "id": "s9",
+      "name": "Calculate Positions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 400]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent($json.symbol) + '?range=1d&interval=1d' }}",
+        "options": { "timeout": 15000 }
+      },
+      "id": "s10",
+      "name": "Get Last Price",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 400],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge prices with positions, compute unrealized P/L\nconst positions = $('Calculate Positions').all().map(i => i.json);\nreturn $input.all().map((item, idx) => {\n  const p = positions[idx];\n  const meta = item.json?.chart?.result?.[0]?.meta || {};\n  const last = Number(meta.regularMarketPrice ?? NaN);\n  const prevClose = Number(meta.chartPreviousClose ?? meta.previousClose ?? NaN);\n  const marketValue = isNaN(last) ? null : Number((last * p.qty).toFixed(2));\n  const unrealized = isNaN(last) || p.qty === 0 ? 0 : Number(((last - p.avgCost) * p.qty).toFixed(2));\n  const unrealizedPct = p.avgCost && !isNaN(last) ? Number((((last - p.avgCost) / p.avgCost) * 100).toFixed(2)) : 0;\n  const dayChangePct = !isNaN(last) && !isNaN(prevClose) && prevClose ? Number((((last - prevClose) / prevClose) * 100).toFixed(2)) : null;\n  return { json: { ...p, currency: meta.currency || '', lastPrice: isNaN(last) ? null : last, dayChangePct, marketValue, unrealized, unrealizedPct, priceOk: !isNaN(last), updatedAt: new Date().toISOString() } };\n});"
+      },
+      "id": "s11",
+      "name": "Calculate P/L",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 400]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "mode": "url", "value": "" },
+        "sheetName": { "__rl": true, "mode": "name", "value": "Portfolio" },
+        "columns": { "mappingMode": "autoMapInputData", "value": {}, "matchingColumns": ["symbol"] },
+        "options": {}
+      },
+      "id": "s12",
+      "name": "Update Portfolio Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1100, 320]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One Telegram summary for the day\nconst rows = $('Calculate P/L').all().map(i => i.json);\nconst open = rows.filter(r => r.qty > 0);\nconst fmt = n => (n > 0 ? '+' : '') + Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 });\nconst totalUnreal = open.reduce((s, r) => s + (r.unrealized || 0), 0);\nconst totalReal = rows.reduce((s, r) => s + (r.realized || 0), 0);\nconst lines = open.sort((a, b) => b.unrealized - a.unrealized).map(r => `${r.symbol}: ${r.qty} @ ${r.avgCost} | last ${r.lastPrice ?? 'n/a'} (${r.dayChangePct ?? '-'}% today) | P/L ${fmt(r.unrealized)} (${fmt(r.unrealizedPct)}%)`);\nconst missing = rows.filter(r => r.qty > 0 && !r.priceOk).map(r => r.symbol);\nconst text = `📊 Portfolio ${new Date().toISOString().slice(0, 10)}\\n\\n${lines.join('\\n') || 'No open positions'}\\n\\nUnrealized: ${fmt(totalUnreal)}\\nRealized (all time): ${fmt(totalReal)}` + (missing.length ? `\\n\\n⚠️ No price for: ${missing.join(', ')}` : '');\nreturn [{ json: { text } }];"
+      },
+      "id": "s13",
+      "name": "Build Daily Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 500]
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "id": "s14",
+      "name": "Send Daily Report",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1320, 500]
+    }
+  ],
+  "connections": {
+    "Telegram: New Trade": { "main": [[{ "node": "Parse Trade Command", "type": "main", "index": 0 }]] },
+    "Parse Trade Command": { "main": [[{ "node": "Valid Command?", "type": "main", "index": 0 }]] },
+    "Valid Command?": { "main": [
+      [{ "node": "Log Trade", "type": "main", "index": 0 }],
+      [{ "node": "Send Format Help", "type": "main", "index": 0 }]
+    ] },
+    "Log Trade": { "main": [[{ "node": "Confirm Trade", "type": "main", "index": 0 }]] },
+    "Weekdays 18:30 (after close)": { "main": [[{ "node": "Read All Trades", "type": "main", "index": 0 }]] },
+    "Read All Trades": { "main": [[{ "node": "Calculate Positions", "type": "main", "index": 0 }]] },
+    "Calculate Positions": { "main": [[{ "node": "Get Last Price", "type": "main", "index": 0 }]] },
+    "Get Last Price": { "main": [[{ "node": "Calculate P/L", "type": "main", "index": 0 }]] },
+    "Calculate P/L": { "main": [[
+      { "node": "Update Portfolio Sheet", "type": "main", "index": 0 },
+      { "node": "Build Daily Summary", "type": "main", "index": 0 }
+    ]] },
+    "Build Daily Summary": { "main": [[{ "node": "Send Daily Report", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1", "timezone": "Europe/Istanbul" },
+  "pinData": {}
+}
